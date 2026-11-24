@@ -85,6 +85,39 @@ def main() -> int:
         "manifest_no": "BL-1", "batch_id": "B-BIG", "side": "library",
         "seg_start": 1, "seg_end": 2_000_000_000})
     call("GET", "/batches/B-BIG/reconcile")
+
+    # 10. 补档时效：采集端/影像库先后补齐，按最后补齐的一侧汇总班次账
+    import time
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    call("POST", "/batches", {"batch_id": "B-SHIFT", "frame_start": 0, "frame_end": 999})
+    call("POST", "/manifests", {
+        "manifest_no": "S-L1", "batch_id": "B-SHIFT", "side": "library",
+        "seg_start": 0, "seg_end": 999})
+    print("      …等待 2 秒，让欠档秒数可见…")
+    time.sleep(2)
+    # 采集端最后补齐，账记在 collector 侧；先补齐 0-499，再补 500-999
+    call("POST", "/manifests", {
+        "manifest_no": "S-C1", "batch_id": "B-SHIFT", "side": "collector",
+        "seg_start": 0, "seg_end": 499})
+    call("POST", "/manifests", {
+        "manifest_no": "S-C2", "batch_id": "B-SHIFT", "side": "collector",
+        "seg_start": 500, "seg_end": 999})
+    lo = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hi = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    call("GET", f"/batches/B-SHIFT/shift-summary?start={lo}&end={hi}&timeout_seconds=1")
+
+    # 11. 结清后再缺档：撤回 500-999 另起一轮，重新补齐再结清一次，旧账保留
+    print("      …等待 2 秒后撤回并重新补齐，演示另起一轮…")
+    time.sleep(2)
+    call("POST", "/manifests/withdraw", {"manifest_no": "S-C2"})
+    time.sleep(2)
+    call("POST", "/manifests", {
+        "manifest_no": "S-C3", "batch_id": "B-SHIFT", "side": "collector",
+        "seg_start": 500, "seg_end": 999})
+    call("GET", f"/batches/B-SHIFT/shift-summary?start={lo}&end={hi}&timeout_seconds=1")
+
     print("== 演示完成 ==")
     return 0
 

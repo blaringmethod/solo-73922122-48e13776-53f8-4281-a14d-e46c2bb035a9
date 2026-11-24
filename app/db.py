@@ -15,7 +15,7 @@ import sqlite3
 from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple
 
-from . import intervals
+from . import intervals, timing
 
 DEFAULT_DB_PATH = os.environ.get(
     "QC_DB_PATH", os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "qc.db")
@@ -56,6 +56,37 @@ CREATE TABLE IF NOT EXISTS coverage (
 );
 CREATE INDEX IF NOT EXISTS idx_coverage_lookup
     ON coverage (batch_id, side, seg_start, seg_end);
+
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+-- 当前仍在缺档中的轮次：每个号段沿用本轮起点，轮次可被结清切分。
+CREATE TABLE IF NOT EXISTS open_rounds (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id    TEXT NOT NULL REFERENCES batches(batch_id),
+    seg_start   INTEGER NOT NULL,
+    seg_end     INTEGER NOT NULL,
+    round_start INTEGER NOT NULL,
+    CHECK (seg_end >= seg_start)
+);
+CREATE INDEX IF NOT EXISTS idx_open_rounds_lookup
+    ON open_rounds (batch_id, seg_start, seg_end);
+
+-- 已结清的账：结清时刻、最后补齐的一侧、帧号段与欠档秒数。
+CREATE TABLE IF NOT EXISTS settlements (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id     TEXT NOT NULL REFERENCES batches(batch_id),
+    side         TEXT NOT NULL CHECK (side IN ('collector', 'library')),
+    settle_at    INTEGER NOT NULL,
+    seg_start    INTEGER NOT NULL,
+    seg_end      INTEGER NOT NULL,
+    owed_seconds INTEGER NOT NULL,
+    CHECK (seg_end >= seg_start)
+);
+CREATE INDEX IF NOT EXISTS idx_settlements_shift
+    ON settlements (batch_id, settle_at);
 """
 
 
@@ -76,6 +107,10 @@ def init_db(db_path: Optional[str] = None) -> None:
     try:
         conn.executescript(SCHEMA)
         conn.commit()
+        # 功能首次启用：旧批次在库内没有轮次，按启用时刻给未齐帧起账。
+        # 已完成则只读 meta，重启不会重置计时。
+        with transaction(conn):
+            timing.ensure_feature_enabled(conn)
     finally:
         conn.close()
 
@@ -105,6 +140,8 @@ def create_batch(conn: sqlite3.Connection, batch_id: str, start: int, end: int) 
         "INSERT INTO batches (batch_id, frame_start, frame_end) VALUES (?, ?, ?)",
         (batch_id, start, end),
     )
+    # 新批次的未齐帧从登记时刻开始计时（登记时尚无任何清单）
+    timing.open_batch(conn, batch_id, start, end)
 
 
 # ---------- 清单 ----------
